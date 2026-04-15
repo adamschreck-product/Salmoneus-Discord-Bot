@@ -1,5 +1,7 @@
 import os
 
+import re
+
 import discord
 
 import random
@@ -10,15 +12,31 @@ import time
 
 from collections import deque
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 
 
-load_dotenv()
+_DATA_DIR = Path(__file__).resolve().parent
+
+load_dotenv(_DATA_DIR / ".env")
+
+
+def _get_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Invalid {name} value '{raw}', using default {default}.")
+        return default
 
 
 
 # --- CONFIGURATION ---
+NEW_MEMBER_ROLE_ID = _get_env_int("NEW_MEMBER_ROLE_ID", 315490765226639361)
 
 # Random line from phrases.txt when @mentioned; per-guild cooldown between such replies.
 
@@ -51,8 +69,6 @@ AVOID_REPEAT_LAST_N = 10
 _recent_phrases = deque(maxlen=AVOID_REPEAT_LAST_N)
 
 _recent_greetings = deque(maxlen=AVOID_REPEAT_LAST_N)
-
-_recent_farewells = deque(maxlen=AVOID_REPEAT_LAST_N)
 
 
 
@@ -104,7 +120,7 @@ def get_phrase_from_file(filename: str, recent: deque) -> str:
 
     try:
 
-        with open(filename, "r", encoding="utf-8") as f:
+        with open(_DATA_DIR / filename, "r", encoding="utf-8") as f:
 
             lines = [line.strip() for line in f if line.strip()]
 
@@ -129,6 +145,74 @@ def get_phrase_from_file(filename: str, recent: deque) -> str:
     except Exception as e:
 
         return f"Inventory error: {e}"
+
+
+# First http(s) URL in farewell.txt splits the template: text before, GIF embed, text after.
+
+_FAREWELL_URL_RE = re.compile(r"https?://[^\s]+")
+
+# Strip one layer of matching outer quotes (ASCII or common Unicode) from a segment.
+
+_FAREWELL_QUOTE_PAIRS = (
+    ('"', '"'),
+    ("\u201c", "\u201d"),
+    ("\u2018", "\u2019"),
+    ("'", "'"),
+)
+
+
+def _strip_outer_quotes(s: str) -> str:
+
+    s = s.strip()
+
+    for open_q, close_q in _FAREWELL_QUOTE_PAIRS:
+
+        if s.startswith(open_q) and s.endswith(close_q) and len(s) >= 2:
+
+            return s[len(open_q) : -len(close_q)].strip()
+
+    return s
+
+
+async def send_farewell(channel: discord.TextChannel, member: discord.Member) -> None:
+
+    with open(_DATA_DIR / "farewell.txt", "r", encoding="utf-8") as f:
+
+        raw = f.read().strip()
+
+    if not raw:
+
+        return
+
+    mention = member.mention
+
+    m = _FAREWELL_URL_RE.search(raw)
+
+    if not m:
+
+        await channel.send(raw.replace("{user}", mention))
+
+        return
+
+    before = _strip_outer_quotes(raw[: m.start()].strip())
+
+    url = m.group(0)
+
+    after = _strip_outer_quotes(raw[m.end() :].strip())
+
+    before = before.replace("{user}", mention)
+
+    after = after.replace("{user}", mention)
+
+    if before:
+
+        await channel.send(before)
+
+    await channel.send(url)
+
+    if after:
+
+        await channel.send(f"*{after}*")
 
 
 
@@ -178,6 +262,15 @@ async def on_member_join(member: discord.Member):
 
         return
 
+    try:
+        role = member.guild.get_role(NEW_MEMBER_ROLE_ID)
+        if role is None:
+            print(f"role assignment failed: role {NEW_MEMBER_ROLE_ID} not found in guild {member.guild.id}")
+        else:
+            await member.add_roles(role, reason="Auto-assign default Salmon role to new member")
+    except Exception as e:
+        print(f"role assignment failed: {e}")
+
     channel = _greet_farewell_channel_by_guild.get(member.guild.id)
 
     if not channel:
@@ -216,11 +309,7 @@ async def on_member_remove(member: discord.Member):
 
     try:
 
-        text = get_phrase_from_file("farewell.txt", _recent_farewells)
-
-        text = text.replace("{user}", member.mention)
-
-        await channel.send(text)
+        await send_farewell(channel, member)
 
     except Exception as e:
 
