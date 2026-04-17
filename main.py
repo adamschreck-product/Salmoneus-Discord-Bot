@@ -213,7 +213,7 @@ async def send_farewell(channel: discord.TextChannel, member: discord.Member) ->
         )
         return
 
-    mention = str(member.id)
+    mention = member.name
 
     m = _FAREWELL_URL_RE.search(raw)
 
